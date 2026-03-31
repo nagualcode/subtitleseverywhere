@@ -1,0 +1,129 @@
+#!/bin/bash
+# ==============================================================================
+# subxtra - Internal Track Extractor (v3.6 - Empty Target Safe)
+# ==============================================================================
+
+SKIP_OCR=false
+if [ "$1" == "-o" ]; then SKIP_OCR=true; shift; fi
+
+if [ "$#" -ne 1 ]; then
+  echo "Usage: $0 [-o] <input.mkv>"; exit 1
+fi
+
+input_file="$1"
+
+# --- LOAD CONFIGURATION ---
+CONF_NAME="subflow.conf"
+SCRIPT_DIR=$(dirname "$(realpath "$0")")
+CONFIG_FOUND=""
+
+if [ -f "./$CONF_NAME" ]; then CONFIG_FOUND="./$CONF_NAME"
+elif [ -f "./.$CONF_NAME" ]; then CONFIG_FOUND="./.$CONF_NAME"
+elif [ -f "$SCRIPT_DIR/$CONF_NAME" ]; then CONFIG_FOUND="$SCRIPT_DIR/$CONF_NAME"
+elif [ -f "$HOME/.$CONF_NAME" ]; then CONFIG_FOUND="$HOME/.$CONF_NAME"
+fi
+
+if [ -n "$CONFIG_FOUND" ]; then
+    source "$CONFIG_FOUND"
+    echo "  ⚙️  Config: $(realpath "$CONFIG_FOUND")"
+else
+    TARGET_ISO="por pob pt"
+    TARGET_PATTERNS=".pt-br .pt .pb"
+    PREF_1="eng"; PREF_2="fra"; PREF_3="jpn"
+fi
+
+TARGET_ISO_REGEX=$(echo "$TARGET_ISO" | xargs | tr ' ' '|')
+PRIMARY_SUFFIX=$(echo "$TARGET_PATTERNS" | awk '{print $1}')
+
+echo "  🔍 Analyzing file DNA (JSON)..."
+
+JSON_DATA=$(mkvmerge --identify --identification-format json "$input_file")
+AUDIO_LANG=$(echo "$JSON_DATA" | jq -r '.tracks[] | select(.type == "audio") | .properties.language' | head -n 1)
+[ -z "$AUDIO_LANG" ] || [ "$AUDIO_LANG" == "null" ] && AUDIO_LANG="und"
+
+QUERY_BASE='.tracks[] | select(.type == "subtitles"'
+[ "$SKIP_OCR" = true ] && QUERY_BASE="$QUERY_BASE and (.properties.codec_id | contains(\"TEXT\") or contains(\"SRT\") or contains(\"ASS\"))"
+QUERY_BASE="$QUERY_BASE)"
+
+SUB_LIST=$(echo "$JSON_DATA" | jq -c "$QUERY_BASE | {
+    id: .id, 
+    lang: .properties.language, 
+    codec: .properties.codec_id,
+    sdh: (
+        (.properties.hearing_impaired == true) or 
+        (.properties.track_name // \"\" | ascii_downcase | (contains(\"sdh\") or contains(\"hi\")))
+    )
+}")
+
+if [ -z "$SUB_LIST" ]; then
+  echo "  ❌ No compatible subtitle tracks found."; exit 1
+fi
+
+pick_best_track() {
+    local lang_regex="$1"
+    local res=""
+    res=$(echo "$SUB_LIST" | jq -r "select((.lang // \"\" | test(\"^($lang_regex)$\"; \"i\")) and .sdh == false) | .id" | head -n 1)
+    if [ -z "$res" ]; then
+        res=$(echo "$SUB_LIST" | jq -r "select(.lang // \"\" | test(\"^($lang_regex)$\"; \"i\")) | .id" | head -n 1)
+    fi
+    echo "$res"
+}
+
+track_id=""
+strategy=""
+
+# PRIORITY 0: Native (Guarded against empty TARGET)
+if [ -n "$TARGET_ISO_REGEX" ]; then
+    track_id=$(pick_best_track "$TARGET_ISO_REGEX")
+    [ -n "$track_id" ] && strategy="Gold (Native matches TARGET_ISO)"
+fi
+
+# PRIORITY 1: Fidelity
+if [ -z "$track_id" ] && [ "$AUDIO_LANG" != "und" ]; then
+    track_id=$(pick_best_track "$AUDIO_LANG")
+    [ -n "$track_id" ] && strategy="Fidelity (Matches Audio: $AUDIO_LANG)"
+fi
+
+# PRIORITY 2, 3, 4: Preferences
+[ -z "$track_id" ] && [ -n "$PREF_1" ] && track_id=$(pick_best_track "$PREF_1") && strategy="Pref 1 ($PREF_1)"
+[ -z "$track_id" ] && [ -n "$PREF_2" ] && track_id=$(pick_best_track "$PREF_2") && strategy="Pref 2 ($PREF_2)"
+[ -z "$track_id" ] && [ -n "$PREF_3" ] && track_id=$(pick_best_track "$PREF_3") && strategy="Pref 3 ($PREF_3)"
+
+if [ -z "$track_id" ]; then
+    track_id=$(echo "$SUB_LIST" | jq -r 'select(.sdh == false) | .id' | head -n 1)
+    [ -z "$track_id" ] && track_id=$(echo "$SUB_LIST" | jq -r '.id' | head -n 1)
+    strategy="Fallback"
+fi
+
+target_info=$(echo "$SUB_LIST" | jq -c "select(.id == $track_id)")
+codec=$(echo "$target_info" | jq -r '.codec')
+final_lang=$(echo "$target_info" | jq -r '.lang')
+is_sdh=$(echo "$target_info" | jq -r '.sdh')
+
+echo "  🎯 Strategy: $strategy $( [ "$is_sdh" == "true" ] && echo "[SDH]" )"
+echo "  ✅ Selected: Track $track_id [$final_lang] ($codec)"
+
+# Only save as translated suffix if it matched the non-empty target
+if [ -n "$TARGET_ISO_REGEX" ] && [[ "$final_lang" =~ ^($TARGET_ISO_REGEX)$ ]]; then 
+    base_save="$input_file${PRIMARY_SUFFIX}.srt"
+else
+    case "$codec" in
+        "S_VOBSUB" | "VobSub") base_save="$input_file.idx" ;;
+        "S_HDMV/PGS" | "PGS") base_save="$input_file.sup" ;;
+        *) base_save="$input_file.srt" ;;
+    esac
+fi
+
+echo "  📦 Extracting..."
+mkvextract tracks "$input_file" "$track_id":"$base_save"
+
+if [[ "$codec" != *"VOBSUB"* && "$codec" != *"PGS"* ]]; then
+    if [[ "$codec" == *"ASS"* || "$codec" == *"SSA"* ]]; then
+        temp_ass="$input_file.ass"; mv "$base_save" "$temp_ass"
+        ffmpeg -i "$temp_ass" "$base_save" -y -loglevel quiet
+        rm "$temp_ass"
+    fi
+    [ -f "$base_save" ] && sed -i 's/<[^>]*>//g' "$base_save" && sed -i 's/{[^}]*}//g' "$base_save"
+fi
+
+echo "  ✅ Extracted: $(basename "$base_save")"

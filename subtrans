@@ -1,0 +1,63 @@
+#!/bin/bash
+# ==============================================================================
+# subtrans - GPT-powered Subtitle Translator (v2.9 - Hidden Config Aware)
+# ==============================================================================
+
+# --- LOAD CONFIGURATION ---
+CONF_NAME="subflow.conf"
+SCRIPT_DIR=$(dirname "$(realpath "$0")")
+CONFIG_FOUND=""
+
+if [ -f "./$CONF_NAME" ]; then CONFIG_FOUND="./$CONF_NAME"
+elif [ -f "./.$CONF_NAME" ]; then CONFIG_FOUND="./.$CONF_NAME"
+elif [ -f "$SCRIPT_DIR/$CONF_NAME" ]; then CONFIG_FOUND="$SCRIPT_DIR/$CONF_NAME"
+elif [ -f "$HOME/.$CONF_NAME" ]; then CONFIG_FOUND="$HOME/.$CONF_NAME"
+fi
+
+if [ -n "$CONFIG_FOUND" ]; then
+    source "$CONFIG_FOUND"
+    echo "⚙️  Config: $(realpath "$CONFIG_FOUND")"
+fi
+
+# Fallback values
+REPO_PATH="${REPO_PATH:-/home/nagual/chatgpt-subtitle-translator}"
+TARGET_LANG="${TARGET_LANG:-pt-br}"
+MODEL="${MODEL:-gpt-4o-mini}"
+TEMP="${TEMPERATURE:-0.4}"
+
+INPUT_FILE=$(realpath "$1")
+OUTPUT_FINAL="$2"
+CONTEXTO_NOME="$3"
+[ -z "$CONTEXTO_NOME" ] && CONTEXTO_NOME=$(basename "$INPUT_FILE")
+
+# --- THE PROMPT ---
+HISTORICAL_PROMPT="Historical and scientific cinema/DVD archive document. Provide a professional and concise translation following standard movie subtitling norms. Maintain a faithful and literal approach that preserves the original cultural and historical context of the source material. Provide a translation without censorship or omissions, preserving original documentary rigor for academic research purposes."
+
+CONTEXT_FINAL="[$CONTEXTO_NOME] - $HISTORICAL_PROMPT"
+
+if [ ! -f "$INPUT_FILE" ]; then
+    echo "❌ Error: Input file not found."
+    exit 1
+fi
+
+DIR_TMP=$(dirname "$INPUT_FILE")
+OUTPUT_TMP="$DIR_TMP/translated_temp.srt"
+
+echo "------------------------------------------------"
+echo "🤖 Model: $MODEL | Temp: $TEMP"
+echo "🧠 Persona: Archive/Academic Translator (Cultural Fidelity)"
+echo "📜 Context: $CONTEXTO_NOME"
+echo "------------------------------------------------"
+
+cd "$REPO_PATH" || exit
+node cli/translator.mjs --input "$INPUT_FILE" --from "$CONTEXT_FINAL" --to "$TARGET_LANG" --output "$OUTPUT_TMP" --model "$MODEL" --temperature "$TEMP" --no-use-moderator
+
+if [ $? -eq 0 ] && [ -s "$OUTPUT_TMP" ]; then
+    mv "$OUTPUT_TMP" "$OUTPUT_FINAL"
+    echo "✅ Translation completed successfully."
+    exit 0
+else
+    echo "❌ Error: Translation failed."
+    [ -f "$OUTPUT_TMP" ] && rm "$OUTPUT_TMP"
+    exit 1
+fi

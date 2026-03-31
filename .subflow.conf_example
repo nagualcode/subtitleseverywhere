@@ -1,0 +1,28 @@
+# ==============================================================================
+# subflow.conf - Configuração de Idiomas e Padrões de Busca
+# ==============================================================================
+
+# --- 1. IDIOMAS NATIVOS (MKV) ---
+# Códigos ISO 639-2 que o script deve considerar como "Já traduzido".
+# Se o script encontrar uma trilha com estes códigos, ele extrai e encerra.
+# Padrões comuns: por (Português), pob (Português Brasil), pt (abreviação).
+TARGET_ISO="por pob pt"
+
+# --- 2. PADRÕES DE ARQUIVO (JÁ PRONTOS) ---
+# Extensões que o script procura na pasta para saber se a missão foi cumprida.
+# O PRIMEIRO item da lista será o sufixo padrão usado para novas traduções.
+TARGET_PATTERNS=".pt-br .pt .pb"
+
+# --- 3. PRIORIDADES DE FONTE (PARA TRADUÇÃO) ---
+# Se não houver idioma nativo, qual idioma o script deve buscar para traduzir?
+# O script tentará primeiro o áudio original, depois seguirá esta ordem:
+PREF_1="fra|fre"
+PREF_2="jpn"
+PREF_3="eng"
+
+# --- 4. CONFIGURAÇÕES DO TRADUTOR (GPT) ---
+# Estas variáveis podem ser usadas para centralizar o comportamento do subtrans.
+MODEL="gpt-4o-mini"
+TEMPERATURE="0.4"
+TARGET_LANG="pt-br"
+REPO_PATH="/PATH_TO/chatgpt-subtitle-translator"

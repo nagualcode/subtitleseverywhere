@@ -1,0 +1,44 @@
+#!/bin/bash
+# ==============================================================================
+# subcheck - Subtitle Batch Orchestrator (v3.6 - Hidden Config Aware)
+# ==============================================================================
+
+# --- LOAD CONFIGURATION ---
+CONF_NAME="subflow.conf"
+SCRIPT_DIR=$(dirname "$(realpath "$0")")
+CONFIG_FOUND=""
+
+if [ -f "./$CONF_NAME" ]; then CONFIG_FOUND="./$CONF_NAME"
+elif [ -f "./.$CONF_NAME" ]; then CONFIG_FOUND="./.$CONF_NAME"
+elif [ -f "$SCRIPT_DIR/$CONF_NAME" ]; then CONFIG_FOUND="$SCRIPT_DIR/$CONF_NAME"
+elif [ -f "$HOME/.$CONF_NAME" ]; then CONFIG_FOUND="$HOME/.$CONF_NAME"
+fi
+
+if [ -n "$CONFIG_FOUND" ]; then
+    echo "⚙️  Batch Config: $(realpath "$CONFIG_FOUND")"
+fi
+
+DAYS_FILTER=""
+FLOW_FLAGS=""
+
+while getopts "d:no" opt; do
+  case $opt in
+    d) DAYS_FILTER="-mtime -$OPTARG" ;;
+    n) FLOW_FLAGS="$FLOW_FLAGS -n" ;;
+    o) FLOW_FLAGS="$FLOW_FLAGS -o" ;;
+    *) exit 1 ;;
+  esac
+done
+
+echo "🚀 Starting scan..."
+echo "------------------------------------------------"
+
+find . -maxdepth 2 $DAYS_FILTER -type f \( -name "*.mkv" -o -name "*.mp4" \) -print0 | while IFS= read -r -d '' file; do
+    [[ "$file" == *.srt ]] && continue
+    if ! subflow $FLOW_FLAGS "$file" < /dev/null; then
+        echo -e "\e[31m⚠️  Failed: $file\e[0m"
+        echo "------------------------------------------------"
+    fi
+done
+
+echo "✅ Done."

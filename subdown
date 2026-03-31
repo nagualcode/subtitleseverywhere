@@ -1,0 +1,150 @@
+#!/bin/bash
+# ==============================================================================
+# subdown - Versão 2.16 (Bidirectional + API Error Reporter)
+# ==============================================================================
+
+if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+    echo "Uso: subdown arquivo.mkv"
+    exit 1
+fi
+
+# --- CONFIGURAÇÃO ---
+FILME_ALVO=$(realpath -- "$1")
+DIR_ORIGEM=$(dirname "$FILME_ALVO")
+NOME_ARQUIVO=$(basename "$FILME_ALVO")
+NOME_SEM_EXT="${NOME_ARQUIVO%.*}"
+BASE_PATH="${FILME_ALVO%.*}"
+
+# --- LOCK ---
+LOCK_DIR="/tmp/subdown_lock_${NOME_ARQUIVO}"
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then exit 1; fi
+trap 'rmdir "$LOCK_DIR" 2>/dev/null; rm -rf "$TMP_WORK_DIR" 2>/dev/null' EXIT
+TMP_WORK_DIR="/tmp/subdown_work_${NOME_ARQUIVO}_$$"
+mkdir -p "$TMP_WORK_DIR"
+
+# --- CREDENCIAIS ---
+USUARIO="fredcinema"
+SENHA="Cinem@2025"
+API_KEY="NFZA0J5a1uNxhs6ME4tYTj2xLnAPFYPA"
+UA="OpenSubtitlesDownload v6.4"
+
+echo "------------------------------------------------"
+echo "🌐 Analisando: $NOME_ARQUIVO"
+
+# 1. LOGIN
+LOGIN_JSON=$(curl -s -L -X POST "https://api.opensubtitles.com/api/v1/login" \
+  -H "Content-Type: application/json" -H "Api-Key: $API_KEY" -H "User-Agent: $UA" \
+  -d "{\"username\": \"$USUARIO\", \"password\": \"$SENHA\"}")
+TOKEN=$(echo "$LOGIN_JSON" | jq -r '.token // empty' 2>/dev/null)
+
+# 2. FUNÇÃO DE BUSCA (Multi-Title)
+buscar_e_selecionar() {
+    local url="$1"; local q_original="$2"; local ano_esperado="$3"
+    local resp=$(curl -s -L -X GET "$url" -H "Api-Key: $API_KEY" -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" -H "User-Agent: $UA")
+    
+    local data_filtrada=$(echo "$resp" | jq -c --arg q "$q_original" --arg y "$ano_esperado" '
+        def clean: ascii_downcase | gsub("\\b(the|a|an|of|and|or)\\b"; "") | gsub("[^a-z0-9]"; "");
+        .data | map(select(
+            ( (($q | clean) as $qc | 
+               ((.attributes.feature_details.title // "") | clean) as $tc | 
+               ((.attributes.feature_details.movie_name // "") | clean) as $mc |
+               ($tc != "" and ($qc == $tc or ($qc | contains($tc)) or ($tc | contains($qc)))) or 
+               ($mc != "" and ($qc == $mc or ($qc | contains($mc)) or ($mc | contains($qc))))
+            ) )
+            and (if $y != "" then (.attributes.feature_details.year | tostring) == $y else true end)
+        ))')
+
+    if [ "$data_filtrada" == "[]" ] || [ -z "$data_filtrada" ]; then echo ""; return; fi
+
+    local selection=$(echo "$data_filtrada" | jq -c '.[] | select(.attributes.language == "pt-br" or .attributes.language == "pt-BR" or .attributes.language == "pb")' | head -n 1)
+    [ -z "$selection" ] && selection=$(echo "$data_filtrada" | jq -c '.[] | select(.attributes.language == "pt")' | head -n 1)
+    [ -z "$selection" ] && selection=$(echo "$data_filtrada" | jq -c '.[] | select(.attributes.language == "en")' | head -n 1)
+    [ -z "$selection" ] && selection=$(echo "$data_filtrada" | jq -c '.[0]')
+    echo "$selection"
+}
+
+# 3. FLUXO DE BUSCA
+RESULTADO=""
+
+HASH_PYTHON=$(cat << 'EOF'
+import os, struct, sys
+try:
+    path = sys.argv[1]; filesize = os.path.getsize(path)
+    if filesize < 131072: sys.exit(0)
+    with open(path, 'rb') as f:
+        fmt = "<8192Q"; buf = f.read(65536); hash_val = filesize + sum(struct.unpack(fmt, buf))
+        f.seek(-65536, os.SEEK_END); buf = f.read(65536); hash_val += sum(struct.unpack(fmt, buf))
+        hash_val &= 0xFFFFFFFFFFFFFFFF; print("%016x" % hash_val)
+except: print("")
+EOF
+)
+MOVIEHASH=$(python3 -c "$HASH_PYTHON" "$FILME_ALVO" 2>/dev/null)
+if [ -n "$MOVIEHASH" ]; then
+    echo "🧬 Buscando por MovieHash..."
+    RESULTADO=$(curl -s -L -X GET "https://api.opensubtitles.com/api/v1/subtitles?moviehash=$MOVIEHASH&languages=pt-br,pt,en,all" -H "Api-Key: $API_KEY" -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" -H "User-Agent: $UA" | jq -c '.data[0] // empty')
+fi
+
+if [ -z "$RESULTADO" ]; then
+    ANO=$(echo "$NOME_SEM_EXT" | grep -oP '\b(19|20)\d{2}\b' | head -n 1)
+    if [ -n "$ANO" ]; then
+        Q1=$(echo "$NOME_SEM_EXT" | awk -F"$ANO" '{print $1}' | tr '._-' '   ' | tr -d '()[]{}' | sed 's/&/and/g' | xargs)
+        Q2=$(echo "$NOME_SEM_EXT" | awk -F"$ANO" '{print $2}' | tr '._-' '   ' | tr -d '()[]{}' | sed -E 's/\b(1080p|720p|576p|480p|BluRay|x264|H264|WEBRip|WEB-DL|WEB|DVD|HDTV|AAC|AC3|REMUX|XviD|DivX)\b.*//gI' | xargs)
+    else
+        Q1=$(echo "$NOME_SEM_EXT" | tr '._-' '   ' | tr -d '()[]{}' | sed 's/&/and/g' | xargs)
+        Q2=""
+    fi
+
+    tentar_busca() {
+        local query="$1"
+        if [ -z "$query" ] || [ "$query" == " " ]; then return; fi
+        local q_esc=$(jq -rn --arg q "$query" '$q | @uri')
+        
+        echo "⚠️  Pesquisando: '$query' (Ano: $ANO)..."
+        RESULTADO=$(buscar_e_selecionar "https://api.opensubtitles.com/api/v1/subtitles?query=$q_esc&languages=pt-br,pt,en,all&year=$ANO" "$query" "$ANO")
+        
+        if [ -z "$RESULTADO" ]; then
+            echo "🕵️  Tentando busca flexível sem restrição de ano..."
+            RESULTADO=$(buscar_e_selecionar "https://api.opensubtitles.com/api/v1/subtitles?query=$q_esc&languages=pt-br,pt,en,all" "$query" "")
+        fi
+    }
+
+    tentar_busca "$Q1"
+    if [ -z "$RESULTADO" ] && [ -n "$Q2" ] && [ "$Q2" != " " ]; then
+        echo "🔄 Invertendo busca: Testando a segunda parte do nome do arquivo..."
+        tentar_busca "$Q2"
+    fi
+fi
+
+# 4. DOWNLOAD (Agora com relatório de erro detalhado)
+if [ -n "$RESULTADO" ]; then
+    FILE_ID=$(echo "$RESULTADO" | jq -r '.attributes.files[0].file_id // empty')
+    LANG_RAW=$(echo "$RESULTADO" | jq -r '.attributes.language // "Desconhecido"')
+    TITULO_WEB=$(echo "$RESULTADO" | jq -r '.attributes.feature_details.title // "Desconhecido"')
+    ANO_WEB=$(echo "$RESULTADO" | jq -r '.attributes.feature_details.year // ""')
+    
+    [[ "$LANG_RAW" =~ ^(pt|pb|pt-br|pt-BR)$ ]] && SUFIXO=".pt-br" || SUFIXO=".${LANG_RAW}"
+    TARGET_SRT="${BASE_PATH}${SUFIXO}.srt"
+    
+    if [ -n "$FILE_ID" ]; then
+        echo "📥 Match perfeito encontrado! Solicitando download da API..."
+        DOWNLOAD_JSON=$(curl -s -L -X POST "https://api.opensubtitles.com/api/v1/download" -H "Content-Type: application/json" -H "Api-Key: $API_KEY" -H "Authorization: Bearer $TOKEN" -H "User-Agent: $UA" -d "{\"file_id\": $FILE_ID}")
+        DOWNLOAD_URL=$(echo "$DOWNLOAD_JSON" | jq -r '.link // empty')
+
+        if [ -n "$DOWNLOAD_URL" ]; then
+            curl -s -L "$DOWNLOAD_URL" -o "${TMP_WORK_DIR}/raw.srt"
+            echo "⚖️  Sincronizando via ffs..."
+            ffs "$FILME_ALVO" -i "${TMP_WORK_DIR}/raw.srt" -o "$TARGET_SRT"
+            [ ! -s "$TARGET_SRT" ] && mv "${TMP_WORK_DIR}/raw.srt" "$TARGET_SRT"
+            echo "✅ Confirmado: '$TITULO_WEB ($ANO_WEB)' [$LANG_RAW]"
+            echo "✨ Concluído: $(basename "$TARGET_SRT")"
+            exit 0
+        else
+            # AQUI O X-9 ENTRA EM AÇÃO
+            API_ERROR=$(echo "$DOWNLOAD_JSON" | jq -r '.message // .errors // "Erro desconhecido"')
+            echo -e "\e[31m🚫 A API bloqueou o download! Motivo: $API_ERROR\e[0m"
+        fi
+    fi
+fi
+
+echo "❌ Nenhuma legenda válida obtida."
+exit 1

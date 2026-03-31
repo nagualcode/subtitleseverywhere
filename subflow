@@ -1,0 +1,187 @@
+#!/bin/bash
+# ==============================================================================
+# subflow - Automated Subtitle Workflow (v7.0 - Atomic Lock & Clean Edition)
+# ==============================================================================
+
+# 1. PARSING FLAGS
+SKIP_SUBDOWN=false
+SKIP_OCR=false
+
+while [[ "$1" =~ ^- ]]; do
+    case $1 in
+        -n) SKIP_SUBDOWN=true ;;
+        -o) SKIP_OCR=true ;;
+        *) echo "Invalid option: $1"; exit 1 ;;
+    esac
+    shift
+done
+
+if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
+    echo "Usage: subflow [-n] [-o] <file.mkv>"; exit 1
+fi
+
+# 2. LOAD CONFIGURATION (4-LEVEL SEARCH)
+CONF_NAME="subflow.conf"
+SCRIPT_DIR=$(dirname "$(realpath "$0")")
+CONFIG_FOUND=""
+
+if [ -f "./$CONF_NAME" ]; then CONFIG_FOUND="./$CONF_NAME"
+elif [ -f "./.$CONF_NAME" ]; then CONFIG_FOUND="./.$CONF_NAME"
+elif [ -f "$SCRIPT_DIR/$CONF_NAME" ]; then CONFIG_FOUND="$SCRIPT_DIR/$CONF_NAME"
+elif [ -f "$HOME/.$CONF_NAME" ]; then CONFIG_FOUND="$HOME/.$CONF_NAME"
+fi
+
+if [ -n "$CONFIG_FOUND" ]; then
+    source "$CONFIG_FOUND"
+    echo "⚙️  Config: $(realpath "$CONFIG_FOUND")"
+else
+    TARGET_ISO="por pob pt"
+    TARGET_PATTERNS=".pt-br .pt .pb"
+    PREF_1="eng"; PREF_2="fra"; PREF_3="jpn"
+fi
+
+TARGET_ISO_REGEX=$(echo "$TARGET_ISO" | xargs | tr ' ' '|')
+PRIMARY_SUFFIX=$(echo "$TARGET_PATTERNS" | awk '{print $1}')
+
+# 3. ENVIRONMENT AND NAME SETUP
+TARGET_MOVIE=$(realpath -- "$1")
+ORIGIN_DIR=$(dirname "$TARGET_MOVIE")
+FILE_NAME=$(basename "$TARGET_MOVIE")
+BASE_NAME="${FILE_NAME%.*}"
+FIND_SAFE=$(echo "$BASE_NAME" | sed 's/\[/\\\[/g; s/\]/\\\]/g')
+
+# 4. ATOMIC LOCKING MECHANISM
+# Usamos um hash do nome do arquivo para o lock ser único por arquivo processado
+FILE_HASH=$(echo "$TARGET_MOVIE" | md5sum | cut -d' ' -f1)
+LOCK_DIR="/tmp/subflow_lock_$FILE_HASH"
+
+if ! mkdir "$LOCK_DIR" 2>/dev/null; then
+    echo -e "\e[33m⚠️  LOCK DETECTADO:\e[0m O arquivo já está sendo processado por outra instância"
+    echo -e "   ou uma execução anterior foi interrompida bruscamente."
+    echo -e "   Para destravar manualmente, remova a pasta:"
+    echo -e "   \e[36mrm -rf $LOCK_DIR\e[0m"
+    exit 1
+fi
+
+# Garante que o LOCK e a pasta TEMP sejam removidos ao final (sucesso ou erro)
+TMP_WORK_DIR="/tmp/subflow_work_$FILE_HASH"
+trap 'rm -rf "$LOCK_DIR" "$TMP_WORK_DIR" 2>/dev/null' EXIT
+
+mkdir -p "$TMP_WORK_DIR"
+export TESSDATA_PREFIX=/usr/share/tesseract-ocr/4.00/tessdata/
+
+echo "--- 🎬 Processing: $FILE_NAME ---"
+
+# BUILD DYNAMIC 'FIND' ARGUMENTS
+FIND_NATIVE_ARGS=()
+EXCLUDE_NATIVE_ARGS=()
+for pat in $TARGET_PATTERNS; do
+    [ ${#FIND_NATIVE_ARGS[@]} -gt 0 ] && FIND_NATIVE_ARGS+=("-o")
+    FIND_NATIVE_ARGS+=("-name" "${FIND_SAFE}*${pat}*.srt")
+    EXCLUDE_NATIVE_ARGS+=("!" "-name" "*${pat}*")
+done
+
+# 5. COMPLETION CHECK
+echo "🔍 Checking for existing translation/native subtitles..."
+PT_FOUND=$(find "$ORIGIN_DIR" -maxdepth 1 -type f \( "${FIND_NATIVE_ARGS[@]}" \) | head -n 1)
+
+if [ -n "$PT_FOUND" ]; then
+    echo "✅ Found existing: $(basename "$PT_FOUND")"
+    echo "   ✨ Task complete. Skipping."
+    exit 0
+fi
+
+# 6. AUDIO LANGUAGE CHECK
+echo "🎵 Checking internal audio language..."
+AUDIO_ISO=$(mkvmerge -J "$TARGET_MOVIE" | jq -r '.tracks[] | select(.type == "audio") | .properties.language' | head -n 1 2>/dev/null)
+
+if [ -n "$TARGET_ISO_REGEX" ] && [[ "$AUDIO_ISO" =~ ^($TARGET_ISO_REGEX)$ ]]; then
+    echo "✅ Native audio detected ($AUDIO_ISO)."
+    echo "   ✨ No translation needed. Skipping."
+    exit 0
+fi
+
+SRT_TMP_PATH="$TMP_WORK_DIR/source.srt"
+GPT_CONTEXT=""
+
+# 7. EXTERNAL TEXT SEARCH
+echo "📂 Searching for external .srt files..."
+CANDIDATO=$(find "$ORIGIN_DIR" -maxdepth 1 -type f -name "${FIND_SAFE}*.srt" "${EXCLUDE_NATIVE_ARGS[@]}" | head -n 1)
+
+if [ -n "$CANDIDATO" ] && [ -s "$CANDIDATO" ]; then
+    echo "   ✅ Valid external text found: $(basename "$CANDIDATO")"
+    cp "$CANDIDATO" "$SRT_TMP_PATH"
+    GPT_CONTEXT=$(basename "$CANDIDATO")
+fi
+
+# 8. INTERNAL TEXT PROBING (MKV)
+if [ ! -s "$SRT_TMP_PATH" ]; then
+    echo "📦 Probing MKV container for text tracks..."
+    HAS_TEXT=$(mkvmerge -J "$TARGET_MOVIE" | jq '.tracks[] | select(.type == "subtitles" and (.properties.codec_id | contains("TEXT") or contains("SRT") or contains("ASS"))) | .id' | head -n 1)
+    
+    if [ -n "$HAS_TEXT" ]; then
+        echo "   ✅ Internal text detected. Running subxtra..."
+        subxtra $( [ "$SKIP_OCR" = true ] && echo "-o" ) "$TARGET_MOVIE"
+        
+        NEW_PT=$(find "$ORIGIN_DIR" -maxdepth 1 -type f \( "${FIND_NATIVE_ARGS[@]}" \) | head -n 1)
+        if [ -n "$NEW_PT" ]; then
+            echo "   ✨ subxtra extracted a native track! Task complete."
+            exit 0
+        fi
+
+        INTERNAL_SRT=$(find "$ORIGIN_DIR" -maxdepth 1 -type f -name "${FIND_SAFE}*.srt" "${EXCLUDE_NATIVE_ARGS[@]}" | head -n 1)
+        if [ -n "$INTERNAL_SRT" ]; then
+            mv "$INTERNAL_SRT" "$SRT_TMP_PATH"; GPT_CONTEXT="Embedded_SRT"
+        fi
+    fi
+fi
+
+# 9. WEB SEARCH (subdown)
+if [ ! -s "$SRT_TMP_PATH" ] && [ "$SKIP_SUBDOWN" = false ]; then
+    echo "🌐 Searching web (subdown)..."
+    if subdown "$TARGET_MOVIE"; then
+        NEW_WEB=$(find "$ORIGIN_DIR" -maxdepth 1 -type f \( "${FIND_NATIVE_ARGS[@]}" \) | head -n 1)
+        if [ -n "$NEW_WEB" ]; then 
+            echo "   ✨ subdown obtained native lang! Skipping."
+            exit 0
+        fi
+        
+        DOWNLOADED=$(find "$ORIGIN_DIR" -maxdepth 1 -type f -name "${FIND_SAFE}*.srt" "${EXCLUDE_NATIVE_ARGS[@]}" | head -n 1)
+        if [ -n "$DOWNLOADED" ]; then
+            echo "   ✅ Text obtained via Web."
+            mv "$DOWNLOADED" "$SRT_TMP_PATH"; GPT_CONTEXT="Web_Download"
+        fi
+    fi
+fi
+
+# 10. IMAGE EXTRACTION AND OCR
+if [ ! -s "$SRT_TMP_PATH" ] && [ "$SKIP_OCR" = false ]; then
+    echo "🖼️  Probing for image-based subtitles (OCR)..."
+    IMG_SOURCE=$(find "$ORIGIN_DIR" -maxdepth 1 -type f \( -name "${FIND_SAFE}*.idx" -o -name "${FIND_SAFE}*.sup" \) | head -n 1)
+    
+    if [ -z "$IMG_SOURCE" ]; then
+        echo "   📦 No image files found. Extracting from MKV (Slow)..."
+        subxtra "$TARGET_MOVIE"
+        IMG_SOURCE=$(find "$ORIGIN_DIR" -maxdepth 1 -type f \( -name "${FIND_SAFE}*.idx" -o -name "${FIND_SAFE}*.sup" \) | head -n 1)
+    fi
+
+    if [ -n "$IMG_SOURCE" ]; then
+        EXT="${IMG_SOURCE##*.}"; echo "   🎯 Starting OCR on: $(basename "$IMG_SOURCE")"
+        IMG_PROC="$TMP_WORK_DIR/proc.$EXT"; cp "$IMG_SOURCE" "$IMG_PROC"
+        [ "$EXT" == "idx" ] && cp "${IMG_SOURCE%.*}.sub" "${IMG_PROC%.*}.sub" 2>/dev/null
+        
+        if [ "$EXT" == "sup" ]; then pgs2srt "$IMG_PROC"
+        else vobsub2srt --lang en --tesseract-lang eng --y-threshold 110 "${IMG_PROC%.*}"
+        fi
+        [ -f "${IMG_PROC%.*}.srt" ] && mv "${IMG_PROC%.*}.srt" "$SRT_TMP_PATH" && GPT_CONTEXT="OCR_$EXT"
+    fi
+fi
+
+# 11. FINAL TRANSLATION
+if [ -s "$SRT_TMP_PATH" ]; then
+    echo "🚀 Translating (Source: $GPT_CONTEXT)..."
+    subtrans "$SRT_TMP_PATH" "${ORIGIN_DIR}/${BASE_NAME}${PRIMARY_SUFFIX}.srt" "$GPT_CONTEXT"
+else
+    echo "❌ Error: No readable subtitle source found."
+    exit 1
+fi
