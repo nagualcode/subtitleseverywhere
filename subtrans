@@ -1,9 +1,9 @@
 #!/bin/bash
 # ==============================================================================
-# subtrans - GPT-powered Subtitle Translator (v2.9 - Hidden Config Aware)
+# subtrans - GPT-powered Subtitle Translator (v3.1 - Atomic & Adaptive)
 # ==============================================================================
 
-# --- LOAD CONFIGURATION ---
+# --- 1. LOAD CONFIGURATION ---
 CONF_NAME="subflow.conf"
 SCRIPT_DIR=$(dirname "$(realpath "$0")")
 CONFIG_FOUND=""
@@ -25,36 +25,73 @@ TARGET_LANG="${TARGET_LANG:-pt-br}"
 MODEL="${MODEL:-gpt-4o-mini}"
 TEMP="${TEMPERATURE:-0.4}"
 
+if [ -z "$1" ]; then
+    echo "Usage: subtrans <input.srt> [output.srt] [context_name]"; exit 1
+fi
+
 INPUT_FILE=$(realpath "$1")
 OUTPUT_FINAL="$2"
 CONTEXTO_NOME="$3"
 [ -z "$CONTEXTO_NOME" ] && CONTEXTO_NOME=$(basename "$INPUT_FILE")
 
-# --- THE PROMPT ---
-HISTORICAL_PROMPT="Historical and scientific cinema/DVD archive document. Provide a professional and concise translation following standard movie subtitling norms. Maintain a faithful and literal approach that preserves the original cultural and historical context of the source material. Provide a translation without censorship or omissions, preserving original documentary rigor for academic research purposes."
+# --- 2. ATOMIC OUTPUT LOGIC ---
+# Se o usuário não passou o 2º argumento, calculamos o nome baseado no TARGET_LANG
+if [ -z "$OUTPUT_FINAL" ]; then
+    BASE_DIR=$(dirname "$INPUT_FILE")
+    # Remove extensões conhecidas para limpar o nome base
+    CLEAN_NAME=$(basename "$INPUT_FILE" | sed -E 's/\.(en|fr|jp|pt-br|pt|pb|srt)//g')
+    
+    CANDIDATE="$BASE_DIR/$CLEAN_NAME.$TARGET_LANG.srt"
+    
+    if [ -f "$CANDIDATE" ]; then
+        i=1
+        while [ -f "$BASE_DIR/$CLEAN_NAME.$TARGET_LANG.$i.srt" ]; do
+            ((i++))
+        done
+        OUTPUT_FINAL="$BASE_DIR/$CLEAN_NAME.$TARGET_LANG.$i.srt"
+    else
+        OUTPUT_FINAL="$CANDIDATE"
+    fi
+fi
+
+# --- 3. THE ADAPTIVE PROMPT ---
+# Agora o prompt é dinâmico: ele se refere a $TARGET_LANG sem citar "Inglês" como proibido.
+HISTORICAL_PROMPT="Historical and scientific cinema archive document. Professional and concise. 
+INSTRUCTION: Translate the text to $TARGET_LANG. 
+IMPORTANT: If the source text is ALREADY in $TARGET_LANG, do NOT translate it to another language. 
+Instead, perform high-quality proofreading, fix OCR errors, and improve grammar while staying in $TARGET_LANG. 
+Maintain documentary rigor, no censorship, no omissions."
 
 CONTEXT_FINAL="[$CONTEXTO_NOME] - $HISTORICAL_PROMPT"
 
 if [ ! -f "$INPUT_FILE" ]; then
-    echo "❌ Error: Input file not found."
-    exit 1
+    echo "❌ Error: Input file not found."; exit 1
 fi
 
 DIR_TMP=$(dirname "$INPUT_FILE")
-OUTPUT_TMP="$DIR_TMP/translated_temp.srt"
+OUTPUT_TMP="$DIR_TMP/.subtrans_$(basename "$INPUT_FILE" .srt).tmp"
 
 echo "------------------------------------------------"
 echo "🤖 Model: $MODEL | Temp: $TEMP"
-echo "🧠 Persona: Archive/Academic Translator (Cultural Fidelity)"
+echo "🎯 Target: $TARGET_LANG"
 echo "📜 Context: $CONTEXTO_NOME"
+echo "📂 Saving to: $(basename "$OUTPUT_FINAL")"
 echo "------------------------------------------------"
 
+# --- 4. EXECUTION ---
 cd "$REPO_PATH" || exit
-node cli/translator.mjs --input "$INPUT_FILE" --from "$CONTEXT_FINAL" --to "$TARGET_LANG" --output "$OUTPUT_TMP" --model "$MODEL" --temperature "$TEMP" --no-use-moderator
+node cli/translator.mjs \
+    --input "$INPUT_FILE" \
+    --from "$CONTEXT_FINAL" \
+    --to "$TARGET_LANG" \
+    --output "$OUTPUT_TMP" \
+    --model "$MODEL" \
+    --temperature "$TEMP" \
+    --no-use-moderator
 
 if [ $? -eq 0 ] && [ -s "$OUTPUT_TMP" ]; then
     mv "$OUTPUT_TMP" "$OUTPUT_FINAL"
-    echo "✅ Translation completed successfully."
+    echo "✅ Success: $OUTPUT_FINAL"
     exit 0
 else
     echo "❌ Error: Translation failed."
