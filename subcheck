@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# subcheck - Subtitle Batch Orchestrator (v3.6 - Hidden Config Aware)
+# subcheck - Subtitle Batch Orchestrator (v3.8 - File/Dir Target Edition)
 # ==============================================================================
 
 # --- LOAD CONFIGURATION ---
@@ -21,24 +21,56 @@ fi
 DAYS_FILTER=""
 FLOW_FLAGS=""
 
-while getopts "d:no" opt; do
-  case $opt in
-    d) DAYS_FILTER="-mtime -$OPTARG" ;;
-    n) FLOW_FLAGS="$FLOW_FLAGS -n" ;;
-    o) FLOW_FLAGS="$FLOW_FLAGS -o" ;;
-    *) exit 1 ;;
+# Novo motor de parsing que suporta flags longas e curtas
+while [[ "$1" =~ ^- ]]; do
+  case $1 in
+    -d)
+      DAYS_FILTER="-mtime -$2"
+      shift 2
+      ;;
+    --no-download)
+      FLOW_FLAGS="$FLOW_FLAGS --no-download"
+      shift
+      ;;
+    --ocr)
+      FLOW_FLAGS="$FLOW_FLAGS --ocr"
+      shift
+      ;;
+    *)
+      echo "Invalid option: $1"
+      echo "Usage: subcheck [-d days] [--no-download] [--ocr] [file_or_directory]"
+      exit 1
+      ;;
   esac
 done
+
+# Define o alvo. Se não for passado argumento de arquivo/diretório, usa o diretório atual (.)
+TARGET="${1:-.}"
 
 echo "🚀 Starting scan..."
 echo "------------------------------------------------"
 
-find . -maxdepth 2 $DAYS_FILTER -type f \( -name "*.mkv" -o -name "*.mp4" \) -print0 | while IFS= read -r -d '' file; do
-    [[ "$file" == *.srt ]] && continue
-    if ! subflow $FLOW_FLAGS "$file" < /dev/null; then
-        echo -e "\e[31m⚠️  Failed: $file\e[0m"
+# Se o alvo for um arquivo específico, roda apenas nele
+if [ -f "$TARGET" ]; then
+    echo "🎬 File detected: $TARGET"
+    if ! subflow $FLOW_FLAGS "$TARGET" < /dev/null; then
+        echo -e "\e[31m⚠️  Failed: $TARGET\e[0m"
         echo "------------------------------------------------"
     fi
-done
+
+# Se o alvo for um diretório (ou o padrão '.'), faz a busca
+elif [ -d "$TARGET" ]; then
+    echo "📂 Directory detected: $TARGET"
+    find "$TARGET" -maxdepth 2 $DAYS_FILTER -type f \( -name "*.mkv" -o -name "*.mp4" \) -print0 | while IFS= read -r -d '' file; do
+        [[ "$file" == *.srt ]] && continue
+        if ! subflow $FLOW_FLAGS "$file" < /dev/null; then
+            echo -e "\e[31m⚠️  Failed: $file\e[0m"
+            echo "------------------------------------------------"
+        fi
+    done
+else
+    echo -e "\e[31m⚠️  Error: '$TARGET' is not a valid file or directory.\e[0m"
+    exit 1
+fi
 
 echo "✅ Done."

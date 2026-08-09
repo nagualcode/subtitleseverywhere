@@ -1,23 +1,23 @@
 #!/bin/bash
 # ==============================================================================
-# subflow - Automated Subtitle Workflow (v7.0 - Atomic Lock & Clean Edition)
+# subflow - Automated Subtitle Workflow (v7.1 - Safe Default & Long Flags)
 # ==============================================================================
 
 # 1. PARSING FLAGS
 SKIP_SUBDOWN=false
-SKIP_OCR=false
+SKIP_OCR=true
 
 while [[ "$1" =~ ^- ]]; do
     case $1 in
-        -n) SKIP_SUBDOWN=true ;;
-        -o) SKIP_OCR=true ;;
+        --no-download) SKIP_SUBDOWN=true ;;
+        --ocr) SKIP_OCR=false ;;
         *) echo "Invalid option: $1"; exit 1 ;;
     esac
     shift
 done
 
 if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-    echo "Usage: subflow [-n] [-o] <file.mkv>"; exit 1
+    echo "Usage: subflow [--no-download] [--ocr] <file.mkv>"; exit 1
 fi
 
 # 2. LOAD CONFIGURATION (4-LEVEL SEARCH)

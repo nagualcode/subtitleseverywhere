@@ -87,7 +87,7 @@ node cli/translator.mjs \
     --output "$OUTPUT_TMP" \
     --model "$MODEL" \
     --temperature "$TEMP" \
-    --no-use-moderator
+ #   --no-use-moderator
 
 if [ $? -eq 0 ] && [ -s "$OUTPUT_TMP" ]; then
     mv "$OUTPUT_TMP" "$OUTPUT_FINAL"

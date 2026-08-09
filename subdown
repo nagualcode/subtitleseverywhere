@@ -1,10 +1,20 @@
 #!/bin/bash
 # ==============================================================================
-# subdown - Versão 2.16 (Bidirectional + API Error Reporter)
+# subdown - Versão 2.17 (IMDb Override + Bidirectional + API Error Reporter)
 # ==============================================================================
 
+# --- PARSER DE ARGUMENTOS ---
+IMDB_ID=""
+while getopts "i:" opt; do
+  case $opt in
+    i) IMDB_ID="$OPTARG" ;;
+    \?) echo "Uso: subdown [-i imdb_id] arquivo.mkv"; exit 1 ;;
+  esac
+done
+shift $((OPTIND -1))
+
 if [ "$#" -ne 1 ] || [ ! -f "$1" ]; then
-    echo "Uso: subdown arquivo.mkv"
+    echo "Uso: subdown [-i tt1234567] arquivo.mkv"
     exit 1
 fi
 
@@ -23,9 +33,13 @@ TMP_WORK_DIR="/tmp/subdown_work_${NOME_ARQUIVO}_$$"
 mkdir -p "$TMP_WORK_DIR"
 
 # --- CREDENCIAIS ---
-USUARIO="fredcinema"
-SENHA="Cinem@2025"
-API_KEY="NFZA0J5a1uNxhs6ME4tYTj2xLnAPFYPA"
+#USUARIO="fredcinema"
+#SENHA="Cinem@2025"
+#API_KEY="NFZA0J5a1uNxhs6ME4tYTj2xLnAPFYPA"
+USUARIO="rastavibes"
+SENHA="Samuel@26"
+API_KEY="bbjiaEjtboWZp0F5RXtK0FjJ1OA6u2Ug"
+
 UA="OpenSubtitlesDownload v6.4"
 
 echo "------------------------------------------------"
@@ -37,7 +51,7 @@ LOGIN_JSON=$(curl -s -L -X POST "https://api.opensubtitles.com/api/v1/login" \
   -d "{\"username\": \"$USUARIO\", \"password\": \"$SENHA\"}")
 TOKEN=$(echo "$LOGIN_JSON" | jq -r '.token // empty' 2>/dev/null)
 
-# 2. FUNÇÃO DE BUSCA (Multi-Title)
+# 2. FUNÇÃO DE BUSCA POR TEXTO
 buscar_e_selecionar() {
     local url="$1"; local q_original="$2"; local ano_esperado="$3"
     local resp=$(curl -s -L -X GET "$url" -H "Api-Key: $API_KEY" -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" -H "User-Agent: $UA")
@@ -66,7 +80,24 @@ buscar_e_selecionar() {
 # 3. FLUXO DE BUSCA
 RESULTADO=""
 
-HASH_PYTHON=$(cat << 'EOF'
+# 3.0 BUSCA POR IMDB (A "Sniper Rifle")
+if [ -n "$IMDB_ID" ]; then
+    # A API exige apenas o número, então removemos o "tt" e zeros à esquerda.
+    CLEAN_IMDB=$(echo "$IMDB_ID" | sed -E 's/^tt0*//')
+    echo "🎯 Buscando DIRETAMENTE pelo IMDb ID: $IMDB_ID ($CLEAN_IMDB)..."
+    
+    IMDB_JSON=$(curl -s -L -X GET "https://api.opensubtitles.com/api/v1/subtitles?imdb_id=$CLEAN_IMDB&languages=pt-br,pt,en,all" -H "Api-Key: $API_KEY" -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" -H "User-Agent: $UA")
+    
+    # Filtra apenas por hierarquia de idioma, ignorando o título quebrado
+    RESULTADO=$(echo "$IMDB_JSON" | jq -c '.data[] | select(.attributes.language == "pt-br" or .attributes.language == "pt-BR" or .attributes.language == "pb")' | head -n 1)
+    [ -z "$RESULTADO" ] && RESULTADO=$(echo "$IMDB_JSON" | jq -c '.data[] | select(.attributes.language == "pt")' | head -n 1)
+    [ -z "$RESULTADO" ] && RESULTADO=$(echo "$IMDB_JSON" | jq -c '.data[] | select(.attributes.language == "en")' | head -n 1)
+    [ -z "$RESULTADO" ] && RESULTADO=$(echo "$IMDB_JSON" | jq -c '.data[0] // empty')
+fi
+
+# 3.1 BUSCA POR HASH (Se o IMDb não foi fornecido)
+if [ -z "$RESULTADO" ] && [ -z "$IMDB_ID" ]; then
+    HASH_PYTHON=$(cat << 'EOF'
 import os, struct, sys
 try:
     path = sys.argv[1]; filesize = os.path.getsize(path)
@@ -78,12 +109,14 @@ try:
 except: print("")
 EOF
 )
-MOVIEHASH=$(python3 -c "$HASH_PYTHON" "$FILME_ALVO" 2>/dev/null)
-if [ -n "$MOVIEHASH" ]; then
-    echo "🧬 Buscando por MovieHash..."
-    RESULTADO=$(curl -s -L -X GET "https://api.opensubtitles.com/api/v1/subtitles?moviehash=$MOVIEHASH&languages=pt-br,pt,en,all" -H "Api-Key: $API_KEY" -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" -H "User-Agent: $UA" | jq -c '.data[0] // empty')
+    MOVIEHASH=$(python3 -c "$HASH_PYTHON" "$FILME_ALVO" 2>/dev/null)
+    if [ -n "$MOVIEHASH" ]; then
+        echo "🧬 Buscando por MovieHash..."
+        RESULTADO=$(curl -s -L -X GET "https://api.opensubtitles.com/api/v1/subtitles?moviehash=$MOVIEHASH&languages=pt-br,pt,en,all" -H "Api-Key: $API_KEY" -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" -H "User-Agent: $UA" | jq -c '.data[0] // empty')
+    fi
 fi
 
+# 3.2 BUSCA POR TEXTO (Fallback final)
 if [ -z "$RESULTADO" ]; then
     ANO=$(echo "$NOME_SEM_EXT" | grep -oP '\b(19|20)\d{2}\b' | head -n 1)
     if [ -n "$ANO" ]; then
@@ -115,7 +148,7 @@ if [ -z "$RESULTADO" ]; then
     fi
 fi
 
-# 4. DOWNLOAD (Agora com relatório de erro detalhado)
+# 4. DOWNLOAD
 if [ -n "$RESULTADO" ]; then
     FILE_ID=$(echo "$RESULTADO" | jq -r '.attributes.files[0].file_id // empty')
     LANG_RAW=$(echo "$RESULTADO" | jq -r '.attributes.language // "Desconhecido"')
@@ -139,7 +172,6 @@ if [ -n "$RESULTADO" ]; then
             echo "✨ Concluído: $(basename "$TARGET_SRT")"
             exit 0
         else
-            # AQUI O X-9 ENTRA EM AÇÃO
             API_ERROR=$(echo "$DOWNLOAD_JSON" | jq -r '.message // .errors // "Erro desconhecido"')
             echo -e "\e[31m🚫 A API bloqueou o download! Motivo: $API_ERROR\e[0m"
         fi

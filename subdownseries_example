@@ -1,0 +1,2 @@
+find . -type f -name "*.mkv" | sort | while read -r mkv; do srt="${mkv%.mkv}.ja.srt"; if [ ! -f "$srt" ]; then subdownseries -p tt0074002 -l ja "$mkv"; sleep 3; else echo "⏭️ Pulando: $(basename "$srt") já existe."; fi; done
+

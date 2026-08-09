@@ -1,0 +1,88 @@
+#!/bin/bash
+# ==============================================================================
+# subdown_tv - O Caçador de Séries (Parent IMDb + SxxExx)
+# ==============================================================================
+
+PARENT_IMDB=""
+LANG_ALVO="en" # Forçado para Inglês
+
+while getopts "p:l:" opt; do
+  case $opt in
+    p) PARENT_IMDB="$OPTARG" ;;
+    l) LANG_ALVO="$OPTARG" ;;
+    \?) echo "Uso: subdown_tv -p tt1234567 [-l en] arquivo.mkv"; exit 1 ;;
+  esac
+done
+shift $((OPTIND -1))
+
+if [ "$#" -ne 1 ] || [ ! -f "$1" ] || [ -z "$PARENT_IMDB" ]; then
+    echo "Uso: subdown_tv -p tt0074002 arquivo.mkv"
+    exit 1
+fi
+
+FILME_ALVO=$(realpath -- "$1")
+BASE_PATH="${FILME_ALVO%.*}"
+NOME_ARQUIVO=$(basename "$FILME_ALVO")
+
+# --- CREDENCIAIS ---
+USUARIO="rastavibes"
+#SENHA="Cinem@2025"
+SENHA="Samuel@26"
+API_KEY="bbjiaEjtboWZp0F5RXtK0FjJ1OA6u2Ug"
+UA="OpenSubtitlesDownload v6.4"
+
+# --- EXTRAÇÃO DE SEASON E EPISODE ---
+# Tenta o padrão S01E02
+SEASON=$(echo "$NOME_ARQUIVO" | grep -oP -i 'S\d+' | head -n 1 | sed -E 's/[sS]0*//')
+EPISODE=$(echo "$NOME_ARQUIVO" | grep -oP -i 'E\d+' | head -n 1 | sed -E 's/[eE]0*//')
+
+if [ -z "$SEASON" ] || [ -z "$EPISODE" ]; then
+    # Se não tiver S01E02, procura números de 2 ou 3 dígitos isolados (Ex: "Marco - 02.mkv")
+    EP_ALT=$(echo "$NOME_ARQUIVO" | grep -oP '\b\d{2,3}\b' | head -n 1 | sed -E 's/^0+//')
+    if [ -n "$EP_ALT" ]; then
+        SEASON="1" # Animes antigos costumam ser apenas 1 temporada gigante
+        EPISODE="$EP_ALT"
+    else
+        echo "❌ Erro: Não consegui achar o número do episódio em: $NOME_ARQUIVO"
+        exit 1
+    fi
+fi
+[ -z "$SEASON" ] && SEASON="1"
+
+CLEAN_IMDB=$(echo "$PARENT_IMDB" | sed -E 's/^tt0*//')
+
+echo "------------------------------------------------"
+echo "📺 Arquivo: $NOME_ARQUIVO"
+echo "🎯 Série IMDb: $CLEAN_IMDB | Temporada: $SEASON | Episódio: $EPISODE | Idioma: $LANG_ALVO"
+
+LOGIN_JSON=$(curl -s -L -X POST "https://api.opensubtitles.com/api/v1/login" \
+  -H "Content-Type: application/json" -H "Api-Key: $API_KEY" -H "User-Agent: $UA" \
+  -d "{\"username\": \"$USUARIO\", \"password\": \"$SENHA\"}")
+TOKEN=$(echo "$LOGIN_JSON" | jq -r '.token // empty' 2>/dev/null)
+
+API_URL="https://api.opensubtitles.com/api/v1/subtitles?parent_imdb_id=${CLEAN_IMDB}&season_number=${SEASON}&episode_number=${EPISODE}&languages=${LANG_ALVO}"
+
+RESP=$(curl -s -L -X GET "$API_URL" -H "Api-Key: $API_KEY" -H "Authorization: Bearer $TOKEN" -H "Accept: application/json" -H "User-Agent: $UA")
+
+# Pega a primeira legenda em inglês encontrada
+FILE_ID=$(echo "$RESP" | jq -r '.data[0].attributes.files[0].file_id // empty')
+
+if [ -n "$FILE_ID" ]; then
+    echo "📥 Match Perfeito encontrado! Baixando legenda..."
+    DOWNLOAD_JSON=$(curl -s -L -X POST "https://api.opensubtitles.com/api/v1/download" -H "Content-Type: application/json" -H "Api-Key: $API_KEY" -H "Authorization: Bearer $TOKEN" -H "User-Agent: $UA" -d "{\"file_id\": $FILE_ID}")
+    DOWNLOAD_URL=$(echo "$DOWNLOAD_JSON" | jq -r '.link // empty')
+
+    if [ -n "$DOWNLOAD_URL" ]; then
+        TARGET_SRT="${BASE_PATH}.${LANG_ALVO}.srt"
+        curl -s -L "$DOWNLOAD_URL" -o "$TARGET_SRT"
+        echo "✨ Concluído: $(basename "$TARGET_SRT")"
+        exit 0
+    else
+        API_ERROR=$(echo "$DOWNLOAD_JSON" | jq -r '.message // .errors // "Erro desconhecido"')
+        echo -e "\e[31m🚫 API Bloqueou o download: $API_ERROR\e[0m"
+        exit 1
+    fi
+else
+    echo "❌ Nenhuma legenda em $LANG_ALVO para o Episódio $EPISODE."
+    exit 1
+fi
