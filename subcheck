@@ -1,7 +1,19 @@
 #!/bin/bash
 # ==============================================================================
-# subcheck - Subtitle Batch Orchestrator (v3.8 - File/Dir Target Edition)
+# subcheck - Subtitle Batch Orchestrator (v3.9 - Lockfile Edition)
 # ==============================================================================
+
+LOCKFILE="/tmp/subcheck.lock"
+
+# Sistema de Lock: Tenta criar o arquivo de forma atômica.
+# Se falhar (arquivo já existe), entra no loop de 3 segundos.
+while ! ( set -o noclobber; echo "$$" > "$LOCKFILE" ) 2> /dev/null; do
+    echo -e "\e[33m⏳ Outra instância do subcheck está rodando (PID: $(cat "$LOCKFILE" 2>/dev/null)). Aguardando liberação...\e[0m"
+    sleep 3
+done
+
+# Garante que o lockfile será apagado quando o script terminar, independentemente de como (sucesso, erro ou Ctrl+C)
+trap 'rm -f "$LOCKFILE"' EXIT INT TERM
 
 # --- LOAD CONFIGURATION ---
 CONF_NAME="subflow.conf"
